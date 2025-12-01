@@ -11,6 +11,8 @@ from torch.utils.checkpoint import checkpoint
 from timm.models.vision_transformer import Block
 
 from models.diffloss import DiffLoss
+import torch_dct as dct
+from models.dct_layer import DCT2DLayer
 
 
 def mask_by_order(mask_len, order, bsz, seq_len):
@@ -60,6 +62,11 @@ class MAR(nn.Module):
         self.label_drop_prob = label_drop_prob
         # Fake class embedding for CFG's unconditional generation
         self.fake_latent = nn.Parameter(torch.zeros(1, encoder_embed_dim))
+
+        # --------------------------------------------------------------------------
+        # DCT/IDCT layer
+        self.dct_layer = DCT2DLayer(size_h=img_size // vae_stride, size_w=img_size // vae_stride, direction='dct', norm='ortho')
+        self.idct_layer = DCT2DLayer(size_h=img_size // vae_stride, size_w=img_size // vae_stride, direction='idct', norm='ortho')
 
         # --------------------------------------------------------------------------
         # MAR variant masking ratio, a left-half truncated Gaussian centered at 100% masking ratio with std 0.25
@@ -242,8 +249,15 @@ class MAR(nn.Module):
         # class embed
         class_embedding = self.class_emb(labels)
 
+        # DCT transform into hi/lo frequency token space
+        # print('Before dct: ' + str(imgs.device))
+        # imgs = dct.dct_2d(imgs)
+        # print('After dct: ' + str(imgs.device))
+        imgs = self.dct_layer(imgs)
+
         # patchify and mask (drop) tokens
         x = self.patchify(imgs)
+
         gt_latents = x.clone().detach()
         orders = self.sample_orders(bsz=x.size(0))
         mask = self.random_masking(x, orders)
@@ -324,8 +338,11 @@ class MAR(nn.Module):
             cur_tokens[mask_to_pred.nonzero(as_tuple=True)] = sampled_token_latent
             tokens = cur_tokens.clone()
 
+        # Inverse DCT before unpatchify
+        # tokens = dct.idct_2d(tokens)
         # unpatchify
         tokens = self.unpatchify(tokens)
+        tokens = self.idct_layer(tokens)
         return tokens
 
 

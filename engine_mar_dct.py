@@ -3,6 +3,7 @@ import sys
 from typing import Iterable
 
 import torch
+import torch_dct as dct
 
 import util.misc as misc
 import util.lr_sched as lr_sched
@@ -14,12 +15,6 @@ import numpy as np
 import os
 import copy
 import time
-import wandb
-from tqdm import tqdm
-import random
-from PIL import Image
-from torchvision.utils import make_grid
-from torchvision.transforms import ToTensor
 
 
 def update_ema(target_params, source_params, rate=0.99):
@@ -47,8 +42,6 @@ def train_one_epoch(model, vae,
     header = 'Epoch: [{}]'.format(epoch)
     print_freq = 20
 
-    last_epoch1000x_for_eval = None
-
     optimizer.zero_grad()
 
     if log_writer is not None:
@@ -73,7 +66,7 @@ def train_one_epoch(model, vae,
             x = posterior.sample().mul_(0.2325)
 
         # forward
-        with torch.amp.autocast('cuda'):
+        with torch.cuda.amp.autocast():
             loss = model(x, labels)
 
         loss_value = loss.item()
@@ -82,7 +75,7 @@ def train_one_epoch(model, vae,
             print("Loss is {}, stopping training".format(loss_value))
             sys.exit(1)
 
-        loss_scaler(loss, optimizer, clip_grad=args.grad_clip, parameters=model_params, update_grad=True)
+        loss_scaler(loss, optimizer, clip_grad=args.grad_clip, parameters=model.parameters(), update_grad=True)
         optimizer.zero_grad()
 
         torch.cuda.synchronize()
@@ -95,39 +88,18 @@ def train_one_epoch(model, vae,
         metric_logger.update(lr=lr)
 
         loss_value_reduce = misc.all_reduce_mean(loss_value)
-        # if log_writer is not None:
-        #     """ We use epoch_1000x as the x-axis in tensorboard.
-        #     This calibrates different curves when batch size changes.
-        #     """
-        #     epoch_1000x = int((data_iter_step / len(data_loader) + epoch) * 1000)
-        #     log_writer.add_scalar('train_loss', loss_value_reduce, epoch_1000x)
-        #     log_writer.add_scalar('lr', lr, epoch_1000x)
-        # ====== WANDB 和 TensorBoard 日志记录逻辑 ======
-        if log_writer is not None or wandb.run is not None:
-            """ We use epoch_1000x as the x-axis in tensorboard/wandb.
+        if log_writer is not None:
+            """ We use epoch_1000x as the x-axis in tensorboard.
             This calibrates different curves when batch size changes.
             """
             epoch_1000x = int((data_iter_step / len(data_loader) + epoch) * 1000)
-
-            # 1. TensorBoard 记录
-            if log_writer is not None:
-                log_writer.add_scalar('train_loss', loss_value_reduce, epoch_1000x)
-                log_writer.add_scalar('lr', lr, epoch_1000x)
-
-            # 2. WANDB 记录 (新增部分)
-            if wandb.run is not None:
-                # 使用 wandb.log 记录 Loss 和 LR
-                wandb.log({
-                    'train_loss': loss_value_reduce,
-                    'lr': lr
-                }, step=epoch_1000x) # 将 epoch_1000x 作为 x 轴的 step
-            last_epoch1000x_for_eval = epoch_1000x
-        # ============================================
+            log_writer.add_scalar('train_loss', loss_value_reduce, epoch_1000x)
+            log_writer.add_scalar('lr', lr, epoch_1000x)
 
     # gather the stats from all processes
     metric_logger.synchronize_between_processes()
     print("Averaged stats:", metric_logger)
-    return {k: meter.global_avg for k, meter in metric_logger.meters.items()}, last_epoch1000x_for_eval
+    return {k: meter.global_avg for k, meter in metric_logger.meters.items()}
 
 
 def evaluate(model_without_ddp, vae, ema_params, args, epoch, batch_size=16, log_writer=None, cfg=1.0,
@@ -168,7 +140,7 @@ def evaluate(model_without_ddp, vae, ema_params, args, epoch, batch_size=16, log
     used_time = 0
     gen_img_cnt = 0
 
-    for i in tqdm(range(num_steps)):
+    for i in range(num_steps):
         print("Generation step {}/{}".format(i, num_steps))
 
         labels_gen = class_label_gen_world[world_size * batch_size * i + local_rank * batch_size:
@@ -207,7 +179,7 @@ def evaluate(model_without_ddp, vae, ema_params, args, epoch, batch_size=16, log
             gen_img = gen_img.astype(np.uint8)[:, :, ::-1]
             cv2.imwrite(os.path.join(save_folder, '{}.png'.format(str(img_id).zfill(5))), gen_img)
 
-    # torch.distributed.barrier()
+    torch.distributed.barrier()
     time.sleep(10)
 
     # back to no ema
@@ -216,7 +188,7 @@ def evaluate(model_without_ddp, vae, ema_params, args, epoch, batch_size=16, log
         model_without_ddp.load_state_dict(model_state_dict)
 
     # compute FID and IS
-    if log_writer is not None or wandb.run is not None:
+    if log_writer is not None:
         if args.img_size == 256:
             input2 = None
             fid_statistics_file = 'fid_stats/adm_in256_stats.npz'
@@ -240,45 +212,8 @@ def evaluate(model_without_ddp, vae, ema_params, args, epoch, batch_size=16, log
            postfix = postfix + "_ema"
         if not cfg == 1.0:
            postfix = postfix + "_cfg{}".format(cfg)
-        
-        if log_writer is not None:
-            log_writer.add_scalar('fid{}'.format(postfix), fid, epoch)
-            log_writer.add_scalar('is{}'.format(postfix), inception_score, epoch)
-        if wandb.run is not None:
-            wandb_images = []
-            image_tensors = []
-            n_samples = 9
-            
-            valid_extensions = ('.png', '.jpg', '.jpeg', '.bmp', '.gif')
-            all_files: List[str] = [
-                os.path.join(save_folder, f) for f in os.listdir(save_folder) 
-                if f.lower().endswith(valid_extensions) and os.path.isfile(os.path.join(save_folder, f))
-            ]
-
-            sampled_files = random.sample(all_files, n_samples)
-            for full_path in sampled_files:
-                try:
-                    img = Image.open(full_path).convert("RGB") # 确保是 RGB 格式
-                    img_tensor = ToTensor()(img) 
-                    image_tensors.append(img_tensor)
-                    
-                except Exception as e:
-                    print(f"Error loading image {full_path}: {e}")
-                    continue
-
-            nrow = int(n_samples**0.5) 
-
-            grid_tensor = make_grid(image_tensors, nrow=nrow, padding=2, normalize=True, value_range=(0,1))
-            grid_np = grid_tensor.permute(1, 2, 0).cpu().numpy()
-            grid_pil = Image.fromarray((grid_np * 255).astype(np.uint8)) # 转换为 PIL Image
-
-            # 6. 上传到 WandB
-            wandb.log({
-                    'FID': fid,
-                    'IS': inception_score,
-                    f'Generated Image Grid': wandb.Image(grid_pil, caption=f'Epoch {epoch // 1000}')
-                }, step=epoch)
-            
+        log_writer.add_scalar('fid{}'.format(postfix), fid, epoch)
+        log_writer.add_scalar('is{}'.format(postfix), inception_score, epoch)
         print("FID: {:.4f}, Inception Score: {:.4f}".format(fid, inception_score))
 
         score_file = os.path.join(args.output_dir, 'score_file_ariter{}-diffsteps{}-temp{}-{}cfg{}'.format(args.num_iter,
@@ -289,7 +224,7 @@ def evaluate(model_without_ddp, vae, ema_params, args, epoch, batch_size=16, log
         with open(score_file, 'w') as f:
             f.write("FID: {:.4f}\nInception Score: {:.4f}".format(fid, inception_score))
         # remove temporal saving folder
-        # shutil.rmtree(save_folder)
+        shutil.rmtree(save_folder)
 
     torch.distributed.barrier()
     time.sleep(10)

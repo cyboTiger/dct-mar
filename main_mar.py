@@ -4,10 +4,12 @@ import numpy as np
 import os
 import time
 from pathlib import Path
+import wandb
 
 import torch
 import torch.backends.cudnn as cudnn
 from torch.utils.tensorboard import SummaryWriter
+import torch.distributed as dist
 import torchvision.transforms as transforms
 import torchvision.datasets as datasets
 
@@ -35,7 +37,7 @@ def get_args_parser():
     # VAE parameters
     parser.add_argument('--img_size', default=256, type=int,
                         help='images input size')
-    parser.add_argument('--vae_path', default="pretrained_models/vae/kl16.ckpt", type=str,
+    parser.add_argument('--vae_path', default="/home/ruihan/mar/pretrained_models/vae/kl16.ckpt", type=str,
                         help='images input size')
     parser.add_argument('--vae_embed_dim', default=16, type=int,
                         help='vae output embedding dimension')
@@ -47,7 +49,7 @@ def get_args_parser():
     # Generation parameters
     parser.add_argument('--num_iter', default=64, type=int,
                         help='number of autoregressive iterations to generate an image')
-    parser.add_argument('--num_images', default=50000, type=int,
+    parser.add_argument('--num_images', default=2000, type=int,
                         help='number of images to generate')
     parser.add_argument('--cfg', default=1.0, type=float, help="classifier-free guidance")
     parser.add_argument('--cfg_schedule', default="linear", type=str)
@@ -56,7 +58,7 @@ def get_args_parser():
     parser.add_argument('--save_last_freq', type=int, default=5, help='save last frequency')
     parser.add_argument('--online_eval', action='store_true')
     parser.add_argument('--evaluate', action='store_true')
-    parser.add_argument('--eval_bsz', type=int, default=64, help='generation batch size')
+    parser.add_argument('--eval_bsz', type=int, default=16, help='generation batch size')
 
     # Optimizer parameters
     parser.add_argument('--weight_decay', type=float, default=0.02,
@@ -94,13 +96,13 @@ def get_args_parser():
     parser.add_argument('--temperature', default=1.0, type=float, help='diffusion loss sampling temperature')
 
     # Dataset parameters
-    parser.add_argument('--data_path', default='./data/imagenet', type=str,
+    parser.add_argument('--data_path', default='/home/ruihan/mar/data/imagenet', type=str,
                         help='dataset path')
     parser.add_argument('--class_num', default=1000, type=int)
 
-    parser.add_argument('--output_dir', default='./output_dir',
+    parser.add_argument('--output_dir', default='/home/ruihan/dct-mar/mar/output_dir',
                         help='path where to save, empty for no saving')
-    parser.add_argument('--log_dir', default='./output_dir',
+    parser.add_argument('--log_dir', default='/home/ruihan/dct-mar/mar/output_dir/log_dir',
                         help='path where to tensorboard log')
     parser.add_argument('--device', default='cuda',
                         help='device to use for training / testing')
@@ -134,6 +136,9 @@ def get_args_parser():
 
 
 def main(args):
+    
+    # dist.init_process_group(backend="cuda")
+    
     misc.init_distributed_mode(args)
 
     print('job dir: {}'.format(os.path.dirname(os.path.realpath(__file__))))
@@ -157,6 +162,18 @@ def main(args):
     else:
         log_writer = None
 
+    # wandb setup
+    # mar_size = args.model
+    # train_name = 'pretrain'
+    # val_name = 'eval'
+    # proj_name = val_name if args.evaluate else train_name
+    # run_name =  args.model if args.evaluate else f"run-blr-{args.blr}-clip-{args.grad_clip}-lr_sched-{args.lr_schedule}" 
+    # wandb.init(
+    #     project=f"MAR-DCT-{mar_size}-{proj_name}-with-ImageNet-TrainSet",     # 设置项目名称
+    #     name=run_name,  # 设置本次运行的名称 (方便区分)
+    #     config=args                     # 可选：将所有命令行参数记录为超参数
+    # )
+
     # augmentation following DiT and ADM
     transform_train = transforms.Compose([
         transforms.Lambda(lambda pil_image: center_crop_arr(pil_image, args.img_size)),
@@ -168,7 +185,7 @@ def main(args):
     if args.use_cached:
         dataset_train = CachedFolder(args.cached_path)
     else:
-        dataset_train = datasets.ImageFolder(os.path.join(args.data_path, 'train'), transform=transform_train)
+        dataset_train = datasets.ImageFolder(os.path.join(args.data_path, 'val'), transform=transform_train)
     print(dataset_train)
 
     sampler_train = torch.utils.data.DistributedSampler(
@@ -236,10 +253,15 @@ def main(args):
 
     # resume training
     if args.resume and os.path.exists(os.path.join(args.resume, "checkpoint-last.pth")):
+        torch.serialization.add_safe_globals([argparse.Namespace])
         checkpoint = torch.load(os.path.join(args.resume, "checkpoint-last.pth"), map_location='cpu')
-        model_without_ddp.load_state_dict(checkpoint['model'])
+        model_without_ddp.load_state_dict(checkpoint['model'], strict=False)
         model_params = list(model_without_ddp.parameters())
-        ema_state_dict = checkpoint['model_ema']
+
+        ema_real_state_dict = checkpoint['model_ema']
+        ema_state_dict = copy.deepcopy(model_without_ddp.state_dict())
+        for name, _ in ema_real_state_dict.items():
+            ema_state_dict[name] = ema_real_state_dict[name]
         ema_params = [ema_state_dict[name].cuda() for name, _ in model_without_ddp.named_parameters()]
         print("Resume checkpoint %s" % args.resume)
 
@@ -265,11 +287,12 @@ def main(args):
     # training
     print(f"Start training for {args.epochs} epochs")
     start_time = time.time()
+    min_loss = 1e5
     for epoch in range(args.start_epoch, args.epochs):
         if args.distributed:
             data_loader_train.sampler.set_epoch(epoch)
 
-        train_one_epoch(
+        avg_stats, last_epoch1000x_for_eval = train_one_epoch(
             model, vae,
             model_params, ema_params,
             data_loader_train,
@@ -279,23 +302,27 @@ def main(args):
         )
 
         # save checkpoint
-        if epoch % args.save_last_freq == 0 or epoch + 1 == args.epochs:
+        if (epoch % args.save_last_freq == 0 or epoch + 1 == args.epochs) and min_loss > avg_stats['loss']:
+            min_loss = avg_stats['loss']
             misc.save_model(args=args, model=model, model_without_ddp=model_without_ddp, optimizer=optimizer,
-                            loss_scaler=loss_scaler, epoch=epoch, ema_params=ema_params, epoch_name="last")
+                            loss_scaler=loss_scaler, epoch=epoch, ema_params=ema_params, epoch_name=f"last")
+            print(f"Update checkpoint-last.pth for smaller loss: {min_loss}")
 
         # online evaluation
-        if args.online_eval and (epoch % args.eval_freq == 0 or epoch + 1 == args.epochs):
+        if args.online_eval and epoch != 0 and (epoch % args.eval_freq == 0 or epoch + 1 == args.epochs):
             torch.cuda.empty_cache()
-            evaluate(model_without_ddp, vae, ema_params, args, epoch, batch_size=args.eval_bsz, log_writer=log_writer,
-                     cfg=1.0, use_ema=True)
-            if not (args.cfg == 1.0 or args.cfg == 0.0):
-                evaluate(model_without_ddp, vae, ema_params, args, epoch, batch_size=args.eval_bsz // 2,
+            # evaluate(model_without_ddp, vae, ema_params, args, epoch, batch_size=args.eval_bsz, log_writer=log_writer,
+            #          cfg=1.0, use_ema=True)
+            # if not (args.cfg == 1.0 or args.cfg == 0.0):
+            evaluate(model_without_ddp, vae, ema_params, args, last_epoch1000x_for_eval, batch_size=args.eval_bsz // 2,
                          log_writer=log_writer, cfg=args.cfg, use_ema=True)
             torch.cuda.empty_cache()
 
         if misc.is_main_process():
             if log_writer is not None:
                 log_writer.flush()
+    
+    wandb.finish()
 
     total_time = time.time() - start_time
     total_time_str = str(datetime.timedelta(seconds=int(total_time)))
@@ -306,5 +333,5 @@ if __name__ == '__main__':
     args = get_args_parser()
     args = args.parse_args()
     Path(args.output_dir).mkdir(parents=True, exist_ok=True)
-    args.log_dir = args.output_dir
+    # args.log_dir = args.output_dir
     main(args)
