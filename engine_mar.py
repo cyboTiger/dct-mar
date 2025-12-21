@@ -73,8 +73,9 @@ def train_one_epoch(model, vae,
             x = posterior.sample().mul_(0.2325)
 
         # forward
-        with torch.amp.autocast('cuda'):
-            loss = model(x, labels)
+        # with torch.amp.autocast('cuda'):
+        #     loss = model(x, labels)
+        loss = model(x, labels)
 
         loss_value = loss.item()
 
@@ -181,11 +182,15 @@ def evaluate(model_without_ddp, vae, ema_params, args, epoch, batch_size=16, log
 
         # generation
         with torch.no_grad():
-            with torch.amp.autocast(device_type="cuda"):
-                sampled_tokens = model_without_ddp.sample_tokens(bsz=batch_size, num_iter=args.num_iter, cfg=cfg,
+            # with torch.amp.autocast(device_type="cuda"):
+            #     sampled_tokens = model_without_ddp.sample_tokens(bsz=batch_size, num_iter=args.num_iter, cfg=cfg,
+            #                                                      cfg_schedule=args.cfg_schedule, labels=labels_gen,
+            #                                                      temperature=args.temperature)
+            #     sampled_images = vae.decode(sampled_tokens / 0.2325)
+            sampled_tokens = model_without_ddp.sample_tokens(bsz=batch_size, num_iter=args.num_iter, cfg=cfg,
                                                                  cfg_schedule=args.cfg_schedule, labels=labels_gen,
                                                                  temperature=args.temperature)
-                sampled_images = vae.decode(sampled_tokens / 0.2325)
+            sampled_images = vae.decode(sampled_tokens / 0.2325)
 
         # measure speed after the first generation batch
         if i >= 1:
@@ -217,33 +222,33 @@ def evaluate(model_without_ddp, vae, ema_params, args, epoch, batch_size=16, log
 
     # compute FID and IS
     if log_writer is not None or wandb.run is not None:
-        if args.img_size == 256:
-            input2 = None
-            fid_statistics_file = 'fid_stats/adm_in256_stats.npz'
-        else:
-            raise NotImplementedError
-        metrics_dict = torch_fidelity.calculate_metrics(
-            input1=save_folder,
-            input2=input2,
-            fid_statistics_file=fid_statistics_file,
-            cuda=True,
-            isc=True,
-            fid=True,
-            kid=False,
-            prc=False,
-            verbose=False,
-        )
-        fid = metrics_dict['frechet_inception_distance']
-        inception_score = metrics_dict['inception_score_mean']
+        # if args.img_size == 256:
+        #     input2 = None
+        #     fid_statistics_file = 'fid_stats/adm_in256_stats.npz'
+        # else:
+        #     raise NotImplementedError
+        # metrics_dict = torch_fidelity.calculate_metrics(
+        #     input1=save_folder,
+        #     input2=input2,
+        #     fid_statistics_file=fid_statistics_file,
+        #     cuda=True,
+        #     isc=True,
+        #     fid=True,
+        #     kid=False,
+        #     prc=False,
+        #     verbose=False,
+        # )
+        # fid = metrics_dict['frechet_inception_distance']
+        # inception_score = metrics_dict['inception_score_mean']
         postfix = ""
         if use_ema:
            postfix = postfix + "_ema"
         if not cfg == 1.0:
            postfix = postfix + "_cfg{}".format(cfg)
         
-        if log_writer is not None:
-            log_writer.add_scalar('fid{}'.format(postfix), fid, epoch)
-            log_writer.add_scalar('is{}'.format(postfix), inception_score, epoch)
+        # if log_writer is not None:
+        #     log_writer.add_scalar('fid{}'.format(postfix), fid, epoch)
+        #     log_writer.add_scalar('is{}'.format(postfix), inception_score, epoch)
         if wandb.run is not None:
             wandb_images = []
             image_tensors = []
@@ -274,20 +279,20 @@ def evaluate(model_without_ddp, vae, ema_params, args, epoch, batch_size=16, log
 
             # 6. 上传到 WandB
             wandb.log({
-                    'FID': fid,
-                    'IS': inception_score,
+                    # 'FID': fid,
+                    # 'IS': inception_score,
                     f'Generated Image Grid': wandb.Image(grid_pil, caption=f'Epoch {epoch // 1000}')
                 }, step=epoch)
             
-        print("FID: {:.4f}, Inception Score: {:.4f}".format(fid, inception_score))
+        # print("FID: {:.4f}, Inception Score: {:.4f}".format(fid, inception_score))
 
-        score_file = os.path.join(args.output_dir, 'score_file_ariter{}-diffsteps{}-temp{}-{}cfg{}'.format(args.num_iter,
-                                                                                                     args.num_sampling_steps,
-                                                                                                     args.temperature,
-                                                                                                     args.cfg_schedule,
-                                                                                                     cfg))
-        with open(score_file, 'w') as f:
-            f.write("FID: {:.4f}\nInception Score: {:.4f}".format(fid, inception_score))
+        # score_file = os.path.join(args.output_dir, 'score_file_ariter{}-diffsteps{}-temp{}-{}cfg{}'.format(args.num_iter,
+        #                                                                                              args.num_sampling_steps,
+        #                                                                                              args.temperature,
+        #                                                                                              args.cfg_schedule,
+        #                                                                                              cfg))
+        # with open(score_file, 'w') as f:
+        #     f.write("FID: {:.4f}\nInception Score: {:.4f}".format(fid, inception_score))
         # remove temporal saving folder
         # shutil.rmtree(save_folder)
 

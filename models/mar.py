@@ -12,7 +12,14 @@ from timm.models.vision_transformer import Block
 
 from models.diffloss import DiffLoss
 import torch_dct as dct
-from models.dct_layer import DCT2DLayer
+
+from models.dct_layer import DCT2DLayer, MyDCT2DLayer, MyInverseDCT2DLayer
+
+import matplotlib.pyplot as plt
+from PIL import Image
+import os
+import random
+import seaborn as sns
 
 
 def mask_by_order(mask_len, order, bsz, seq_len):
@@ -65,8 +72,8 @@ class MAR(nn.Module):
 
         # --------------------------------------------------------------------------
         # DCT/IDCT layer
-        self.dct_layer = DCT2DLayer(size_h=img_size // vae_stride, size_w=img_size // vae_stride, direction='dct', norm='ortho')
-        self.idct_layer = DCT2DLayer(size_h=img_size // vae_stride, size_w=img_size // vae_stride, direction='idct', norm='ortho')
+        # self.dct_layer = DCT2DLayer(size_h=img_size // vae_stride, size_w=img_size // vae_stride, direction='dct', norm='ortho')
+        # self.idct_layer = DCT2DLayer(size_h=img_size // vae_stride, size_w=img_size // vae_stride, direction='idct', norm='ortho')
 
         # --------------------------------------------------------------------------
         # MAR variant masking ratio, a left-half truncated Gaussian centered at 100% masking ratio with std 0.25
@@ -248,13 +255,9 @@ class MAR(nn.Module):
 
         # class embed
         class_embedding = self.class_emb(labels)
-
         # DCT transform into hi/lo frequency token space
-        # print('Before dct: ' + str(imgs.device))
-        # imgs = dct.dct_2d(imgs)
-        # print('After dct: ' + str(imgs.device))
-        imgs = self.dct_layer(imgs)
-
+        # imgs = self.dct_layer(imgs)
+        imgs = dct.dct_2d(imgs)
         # patchify and mask (drop) tokens
         x = self.patchify(imgs)
 
@@ -338,11 +341,13 @@ class MAR(nn.Module):
             cur_tokens[mask_to_pred.nonzero(as_tuple=True)] = sampled_token_latent
             tokens = cur_tokens.clone()
 
-        # Inverse DCT before unpatchify
-        # tokens = dct.idct_2d(tokens)
         # unpatchify
         tokens = self.unpatchify(tokens)
-        tokens = self.idct_layer(tokens)
+
+        # Inverse dct
+        # tokens = self.idct_layer(tokens)
+        tokens = dct.idct_2d(tokens)
+
         return tokens
 
 

@@ -84,7 +84,7 @@ def main(args):
         transforms.Normalize([0.5, 0.5, 0.5], [0.5, 0.5, 0.5])
     ])
 
-    dataset_train = ImageFolderWithFilename(os.path.join(args.data_path, 'train'), transform=transform_train)
+    dataset_train = ImageFolderWithFilename(os.path.join(args.data_path, 'test'), transform=transform_train)
     print(dataset_train)
 
     sampler_train = torch.utils.data.DistributedSampler(

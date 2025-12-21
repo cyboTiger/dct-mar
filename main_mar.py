@@ -100,10 +100,12 @@ def get_args_parser():
                         help='dataset path')
     parser.add_argument('--class_num', default=1000, type=int)
 
-    parser.add_argument('--output_dir', default='/home/ruihan/dct-mar/mar/output_dir',
+    parser.add_argument('--output_dir', default='/home/ruihan/dct-mar/mar/output_dir/cifar100',
                         help='path where to save, empty for no saving')
     parser.add_argument('--log_dir', default='/home/ruihan/dct-mar/mar/output_dir/log_dir',
                         help='path where to tensorboard log')
+    parser.add_argument('--wandb', action="store_true",
+                        help='whether to enable wandb logging')
     parser.add_argument('--device', default='cuda',
                         help='device to use for training / testing')
     parser.add_argument('--seed', default=1, type=int)
@@ -163,16 +165,17 @@ def main(args):
         log_writer = None
 
     # wandb setup
-    # mar_size = args.model
-    # train_name = 'pretrain'
-    # val_name = 'eval'
-    # proj_name = val_name if args.evaluate else train_name
-    # run_name =  args.model if args.evaluate else f"run-blr-{args.blr}-clip-{args.grad_clip}-lr_sched-{args.lr_schedule}" 
-    # wandb.init(
-    #     project=f"MAR-DCT-{mar_size}-{proj_name}-with-ImageNet-TrainSet",     # 设置项目名称
-    #     name=run_name,  # 设置本次运行的名称 (方便区分)
-    #     config=args                     # 可选：将所有命令行参数记录为超参数
-    # )
+    if args.wandb:
+        mar_size = args.model
+        train_name = 'pretrain'
+        val_name = 'eval'
+        proj_name = val_name if args.evaluate else train_name
+        run_name =  args.model if args.evaluate else f"run-blr-{args.blr}-clip-{args.grad_clip}-lr_sched-{args.lr_schedule}" 
+        wandb.init(
+            project=f"MAR-DCT-{mar_size}-{proj_name}-with-CIFAR100-TrainSet",     # 设置项目名称
+            name=run_name,  # 设置本次运行的名称 (方便区分)
+            config=args                     # 可选：将所有命令行参数记录为超参数
+        )
 
     # augmentation following DiT and ADM
     transform_train = transforms.Compose([
@@ -185,7 +188,7 @@ def main(args):
     if args.use_cached:
         dataset_train = CachedFolder(args.cached_path)
     else:
-        dataset_train = datasets.ImageFolder(os.path.join(args.data_path, 'val'), transform=transform_train)
+        dataset_train = datasets.ImageFolder(args.data_path, transform=transform_train)
     print(dataset_train)
 
     sampler_train = torch.utils.data.DistributedSampler(
@@ -302,7 +305,7 @@ def main(args):
         )
 
         # save checkpoint
-        if (epoch % args.save_last_freq == 0 or epoch + 1 == args.epochs) and min_loss > avg_stats['loss']:
+        if (epoch % args.save_last_freq == 0 or epoch + 1 == args.epochs) and min_loss > avg_stats['loss'] and epoch > 0:
             min_loss = avg_stats['loss']
             misc.save_model(args=args, model=model, model_without_ddp=model_without_ddp, optimizer=optimizer,
                             loss_scaler=loss_scaler, epoch=epoch, ema_params=ema_params, epoch_name=f"last")
