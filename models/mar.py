@@ -92,6 +92,7 @@ class MAR(nn.Module):
         # DCT/IDCT layer
         self.dct_layer = DCT2DLayer(size_h=img_size, size_w=img_size, direction='dct', norm='ortho')
         self.idct_layer = DCT2DLayer(size_h=img_size, size_w=img_size, direction='idct', norm='ortho')
+        self.ln = nn.LayerNorm(encoder_embed_dim)
 
         # --------------------------------------------------------------------------
         # MAR variant masking ratio, a left-half truncated Gaussian centered at 100% masking ratio with std 0.25
@@ -142,9 +143,14 @@ class MAR(nn.Module):
                                       patch_size=patch_size,
                                       out_channels=in_channels)
 
+        # decoding order related
+        # Zig-zag order starting from top-left
+        self.zigzag_order = self._generate_frequency_order()
+
     def initialize_weights(self):
         # parameters
         torch.nn.init.normal_(self.class_emb.weight, std=.02)
+        torch.nn.init.normal_(self.linear_embed.weight, std=.02)
         torch.nn.init.normal_(self.fake_latent, std=.02)
         torch.nn.init.normal_(self.mask_token, std=.02)
         torch.nn.init.normal_(self.encoder_pos_embed_learned, std=.02)
@@ -210,6 +216,35 @@ class MAR(nn.Module):
         mask = torch.zeros(bsz, seq_len, device=x.device)
         mask = torch.scatter(mask, dim=-1, index=orders[:, :num_masked_tokens],
                              src=torch.ones(bsz, seq_len, device=x.device))
+        return mask
+
+    def _generate_frequency_order(self):
+        """sorted based on euclidean distance"""
+        order = []
+        for i in range(self.grid_size):
+            for j in range(self.grid_size):
+                dist = np.sqrt(i**2 + j**2) 
+                order.append((i * self.grid_size + j, dist))
+        
+        # ascending order
+        order.sort(key=lambda x: x[1])
+        return np.array([x[0] for x in order])
+    
+    def sample_orders_zigzag(self, bsz):
+        order = torch.from_numpy(self.zigzag_order).long().cuda()
+        return order.unsqueeze(0).repeat(bsz, 1)
+
+    def random_masking_zigzag(self, x, orders):
+        bsz, seq_len, _ = x.shape
+        mask_rate = self.mask_ratio_generator.rvs(1)[0] 
+        num_keep = int(np.ceil(seq_len * (1 - mask_rate)))
+        
+        mask = torch.ones(bsz, seq_len, device=x.device)
+        #  num_keep 个是最重要的低频 Token，不遮掩 (mask=0)
+        # 后面的高频 Token 被遮掩 (mask=1)
+        for i in range(bsz):
+            mask[i, orders[i, :num_keep]] = 0
+            
         return mask
 
     def forward_mae_encoder(self, x, mask, class_embedding):
@@ -399,7 +434,7 @@ class MAR(nn.Module):
         tokens = self.final_layer(tokens)
         freqs = self.unpatchify(tokens)
 
-        tokens = safe_exp_transform(tokens)
+        freqs = safe_exp_transform(freqs)
         # Inverse dct
         imgs = self.idct_layer(freqs)
 

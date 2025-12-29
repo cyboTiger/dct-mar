@@ -202,7 +202,7 @@ def evaluate(model_without_ddp, ema_params, args, epoch, batch_size=16, log_writ
 
         # torch.distributed.barrier()
         sampled_images = sampled_images.detach().cpu()
-        # sampled_images = (sampled_images + 1) / 2
+        sampled_images = (sampled_images + 1) / 2
 
         # distributed save
         for b_id in range(sampled_images.size(0)):
