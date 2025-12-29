@@ -785,6 +785,18 @@ class GaussianDiffusion:
                 terms["loss"] = terms["mse"] + terms["vb"]
             else:
                 terms["loss"] = terms["mse"]
+
+            pred_xstart = None
+            if self.model_mean_type == ModelMeanType.START_X:
+                pred_xstart = model_output
+            elif self.model_mean_type == ModelMeanType.EPSILON:
+                pred_xstart = self._predict_xstart_from_eps(x_t=x_t, t=t, eps=model_output)
+            elif self.model_mean_type == ModelMeanType.PREVIOUS_X:
+                raise NotImplementedError(f"Unknown mean type: {self.model_mean_type}")
+            else:
+                raise NotImplementedError(f"Unknown mean type: {self.model_mean_type}")
+            
+            terms["pred_xstart"] = pred_xstart
         else:
             raise NotImplementedError(self.loss_type)
 

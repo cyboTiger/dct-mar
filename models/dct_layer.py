@@ -46,7 +46,7 @@ class DCT2DLayer(nn.Module):
     2D 离散余弦变换模块 (修正版，解决了内存不连续问题)。
     输入形状假定为 (B, C, H, W)。
     """
-    def __init__(self, size_h: int, size_w: int, direction: str, norm: str = None):
+    def __init__(self, size_h: int, size_w: int, direction: str = 'dct', norm: str = None):
         super().__init__()
         
         # 确保 LinearDCT 存在并已定义

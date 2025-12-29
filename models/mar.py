@@ -6,6 +6,7 @@ import scipy.stats as stats
 import math
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from torch.utils.checkpoint import checkpoint
 
 from timm.models.vision_transformer import Block
@@ -14,12 +15,20 @@ from models.diffloss import DiffLoss
 import torch_dct as dct
 
 from models.dct_layer import DCT2DLayer, MyDCT2DLayer, MyInverseDCT2DLayer
+from models.lin_emb import BottleneckPatchEmbed, FinalLayer
 
 import matplotlib.pyplot as plt
 from PIL import Image
 import os
 import random
 import seaborn as sns
+
+def safe_log_transform(x):
+    # use log1p to ensure numerical stability
+    return torch.sign(x) * torch.log1p(torch.abs(x))
+
+def safe_exp_transform(x):
+    return torch.sign(x) * (torch.exp(torch.abs(x)) - 1.0)
 
 
 def mask_by_order(mask_len, order, bsz, seq_len):
@@ -31,7 +40,7 @@ def mask_by_order(mask_len, order, bsz, seq_len):
 class MAR(nn.Module):
     """ Masked Autoencoder with VisionTransformer backbone
     """
-    def __init__(self, img_size=256, vae_stride=16, patch_size=1,
+    def __init__(self, img_size=256, in_channels=3, bottleneck_dim=768, patch_size=1,
                  encoder_embed_dim=1024, encoder_depth=16, encoder_num_heads=16,
                  decoder_embed_dim=1024, decoder_depth=16, decoder_num_heads=16,
                  mlp_ratio=4., norm_layer=nn.LayerNorm,
@@ -47,20 +56,29 @@ class MAR(nn.Module):
                  num_sampling_steps='100',
                  diffusion_batch_mul=4,
                  grad_checkpointing=False,
+                 recon_lambda=0.2
                  ):
         super().__init__()
 
         # --------------------------------------------------------------------------
-        # VAE and patchify specifics
-        self.vae_embed_dim = vae_embed_dim
-
+        # patchify specifics
         self.img_size = img_size
-        self.vae_stride = vae_stride
         self.patch_size = patch_size
-        self.seq_h = self.seq_w = img_size // vae_stride // patch_size
+        self.in_channels = in_channels
+        # 
+        self.seq_h = self.seq_w = img_size // patch_size
         self.seq_len = self.seq_h * self.seq_w
-        self.token_embed_dim = vae_embed_dim * patch_size**2
+        # a patch is transformed into a token
+        self.token_embed_dim = encoder_embed_dim
         self.grad_checkpointing = grad_checkpointing
+        self.linear_embed = nn.Sequential(nn.Linear(patch_size**2*in_channels, bottleneck_dim), 
+                                          nn.Linear(bottleneck_dim, encoder_embed_dim))
+        # self.linear_embed = BottleneckPatchEmbed(img_size=img_size, 
+        #                                          patch_size=patch_size, 
+        #                                          in_chans=in_channels,
+        #                                          pca_dim=bottleneck_dim,
+        #                                          embed_dim=encoder_embed_dim,
+        #                                          bias=True)
 
         # --------------------------------------------------------------------------
         # Class Embedding
@@ -72,8 +90,8 @@ class MAR(nn.Module):
 
         # --------------------------------------------------------------------------
         # DCT/IDCT layer
-        # self.dct_layer = DCT2DLayer(size_h=img_size // vae_stride, size_w=img_size // vae_stride, direction='dct', norm='ortho')
-        # self.idct_layer = DCT2DLayer(size_h=img_size // vae_stride, size_w=img_size // vae_stride, direction='idct', norm='ortho')
+        self.dct_layer = DCT2DLayer(size_h=img_size, size_w=img_size, direction='dct', norm='ortho')
+        self.idct_layer = DCT2DLayer(size_h=img_size, size_w=img_size, direction='idct', norm='ortho')
 
         # --------------------------------------------------------------------------
         # MAR variant masking ratio, a left-half truncated Gaussian centered at 100% masking ratio with std 0.25
@@ -117,6 +135,12 @@ class MAR(nn.Module):
             grad_checkpointing=grad_checkpointing
         )
         self.diffusion_batch_mul = diffusion_batch_mul
+        self.recon_lambda = recon_lambda
+
+        # Final Layer from latent token to 1-D image patches
+        self.final_layer = FinalLayer(hidden_size=self.token_embed_dim,
+                                      patch_size=patch_size,
+                                      out_channels=in_channels)
 
     def initialize_weights(self):
         # parameters
@@ -150,14 +174,19 @@ class MAR(nn.Module):
         x = x.reshape(bsz, c, h_, p, w_, p)
         x = torch.einsum('nchpwq->nhwcpq', x)
         x = x.reshape(bsz, h_ * w_, c * p ** 2)
-        return x  # [n, l, d]
+        return x  # [n, l, c*p*p]
 
     def unpatchify(self, x):
-        bsz = x.shape[0]
+        """
+        x: (N, T, patch_size**2 * C)
+        imgs: (N, C, H, W)
+        """
+        bsz, t, _= x.shape
         p = self.patch_size
-        c = self.vae_embed_dim
+        c = self.in_channels
         h_, w_ = self.seq_h, self.seq_w
 
+        x = x.reshape(bsz, h_, w_, c*p**2)
         x = x.reshape(bsz, h_, w_, c, p, p)
         x = torch.einsum('nhwcpq->nchpwq', x)
         x = x.reshape(bsz, c, h_ * p, w_ * p)
@@ -248,19 +277,26 @@ class MAR(nn.Module):
         target = target.reshape(bsz * seq_len, -1).repeat(self.diffusion_batch_mul, 1)
         z = z.reshape(bsz*seq_len, -1).repeat(self.diffusion_batch_mul, 1)
         mask = mask.reshape(bsz*seq_len).repeat(self.diffusion_batch_mul)
-        loss = self.diffloss(z=z, target=target, mask=mask)
-        return loss
+        loss, pred_xstart = self.diffloss(z=z, target=target, mask=mask)
+        return loss, pred_xstart
 
     def forward(self, imgs, labels):
 
         # class embed
         class_embedding = self.class_emb(labels)
-        # DCT transform into hi/lo frequency token space
-        # imgs = self.dct_layer(imgs)
-        imgs = dct.dct_2d(imgs)
-        # patchify and mask (drop) tokens
-        x = self.patchify(imgs)
 
+        # DCT transform into hi/lo frequency token space
+        x = self.dct_layer(imgs) # [B, c, h, w]
+
+        x = safe_log_transform(x) # approxiamted range: [-12, 12]
+
+        # convert to patch token dim
+        x = self.patchify(x) # [B, l, c*p*p]
+        gt_dct = x.clone().detach() # [B, l, c*p*p]
+        gt_dct = gt_dct.reshape(-1, gt_dct.size(-1)) # [B*l, c*p*p]
+        # patchify & linear embedding
+        x = self.linear_embed(x) # [B*l, embed_dim]
+        
         gt_latents = x.clone().detach()
         orders = self.sample_orders(bsz=x.size(0))
         mask = self.random_masking(x, orders)
@@ -271,8 +307,21 @@ class MAR(nn.Module):
         # mae decoder
         z = self.forward_mae_decoder(x, mask)
 
-        # diffloss
-        loss = self.forward_loss(z=z, target=gt_latents, mask=mask)
+        # diffloss & reconstructed latent
+        loss, pred_xstart = self.forward_loss(z=z, target=gt_latents, mask=mask)
+
+        # pred_xstart shape: [B*l*diffusion_batch_mul, embed_dim]
+        recon_dct = self.final_layer(pred_xstart) # [B*l*diffbm, c*p*p]
+        gt_dct = gt_dct.repeat(self.diffusion_batch_mul, 1)
+        mask_flat = mask.reshape(-1).repeat(self.diffusion_batch_mul)
+        
+        # only compute masked positions
+        recon_loss = F.mse_loss(
+            recon_dct[mask_flat==1],
+            gt_dct[mask_flat==1]
+        )
+
+        loss += self.recon_lambda*recon_loss
 
         return loss
 
@@ -342,13 +391,19 @@ class MAR(nn.Module):
             tokens = cur_tokens.clone()
 
         # unpatchify
-        tokens = self.unpatchify(tokens)
+        # tokens = self.unpatchify(tokens)
 
+        # tokens = dct.idct_2d(tokens)
+
+        # linear embed & unpatchify
+        tokens = self.final_layer(tokens)
+        freqs = self.unpatchify(tokens)
+
+        tokens = safe_exp_transform(tokens)
         # Inverse dct
-        # tokens = self.idct_layer(tokens)
-        tokens = dct.idct_2d(tokens)
+        imgs = self.idct_layer(freqs)
 
-        return tokens
+        return imgs
 
 
 def mar_base(**kwargs):

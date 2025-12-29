@@ -30,7 +30,8 @@ class DiffLoss(nn.Module):
         loss = loss_dict["loss"]
         if mask is not None:
             loss = (loss * mask).sum() / mask.sum()
-        return loss.mean()
+        pred_xstart = loss_dict["pred_xstart"]
+        return loss.mean(), pred_xstart
 
     def sample(self, z, temperature=1.0, cfg=1.0):
         # diffusion loss sampling

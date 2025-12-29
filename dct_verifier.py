@@ -5,6 +5,8 @@ import numpy as np
 from models.dct_layer import DCT2DLayer, MyDCT2DLayer, MyInverseDCT2DLayer
 
 from PIL import Image
+import os
+import random
 
 class DCTtransform(nn.Module):
     def __init__(self, h, w):
@@ -39,7 +41,14 @@ class MyDCTtransform(nn.Module):
     
 def main():
     # x = torch.randn((1, 3, 256, 256))
-    img_path = '/home/ruihan/data/imagenet/train/n01443537/n01443537_50.JPEG'
+    dataset_path = "/home/ruihan/data/imagenet/train/"
+
+    class_path = random.sample(os.listdir(dataset_path), 1)[0]
+    class_path = os.path.join(dataset_path, class_path)
+
+    image_path = random.sample(os.listdir(class_path), 1)[0]
+    img_path = os.path.join(class_path, image_path)
+
     x = Image.open(img_path)
     x = np.array(x, dtype=np.float32)
     x = np.transpose(x, (2, 0, 1))

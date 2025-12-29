@@ -37,13 +37,15 @@ def get_args_parser():
     # VAE parameters
     parser.add_argument('--img_size', default=256, type=int,
                         help='images input size')
-    parser.add_argument('--vae_path', default="/home/ruihan/mar/pretrained_models/vae/kl16.ckpt", type=str,
-                        help='images input size')
-    parser.add_argument('--vae_embed_dim', default=16, type=int,
-                        help='vae output embedding dimension')
-    parser.add_argument('--vae_stride', default=16, type=int,
-                        help='tokenizer stride, default use KL16')
-    parser.add_argument('--patch_size', default=1, type=int,
+    parser.add_argument('--bottleneck_dim', default=768, type=int,
+                        help='bottleneck_dim for linear embed')
+    # parser.add_argument('--vae_path', default="/home/ruihan/mar/pretrained_models/vae/kl16.ckpt", type=str,
+    #                     help='images input size')
+    # parser.add_argument('--vae_embed_dim', default=16, type=int,
+    #                     help='vae output embedding dimension')
+    # parser.add_argument('--vae_stride', default=16, type=int,
+    #                     help='tokenizer stride, default use KL16')
+    parser.add_argument('--patch_size', default=16, type=int,
                         help='number of tokens to group as a patch.')
 
     # Generation parameters
@@ -172,7 +174,7 @@ def main(args):
         proj_name = val_name if args.evaluate else train_name
         run_name =  args.model if args.evaluate else f"run-blr-{args.blr}-clip-{args.grad_clip}-lr_sched-{args.lr_schedule}" 
         wandb.init(
-            project=f"MAR-DCT-{mar_size}-{proj_name}-with-CIFAR100-TrainSet",     # 设置项目名称
+            project=f"MAR-DCT-Linear-{mar_size}-{proj_name}-with-CIFAR100-TrainSet",     # 设置项目名称
             name=run_name,  # 设置本次运行的名称 (方便区分)
             config=args                     # 可选：将所有命令行参数记录为超参数
         )
@@ -205,15 +207,17 @@ def main(args):
     )
 
     # define the vae and mar model
-    vae = AutoencoderKL(embed_dim=args.vae_embed_dim, ch_mult=(1, 1, 2, 2, 4), ckpt_path=args.vae_path).cuda().eval()
-    for param in vae.parameters():
-        param.requires_grad = False
+    # vae = AutoencoderKL(embed_dim=args.vae_embed_dim, ch_mult=(1, 1, 2, 2, 4), ckpt_path=args.vae_path).cuda().eval()
+    # for param in vae.parameters():
+    #     param.requires_grad = False
 
     model = mar.__dict__[args.model](
         img_size=args.img_size,
-        vae_stride=args.vae_stride,
+        # vae_stride=args.vae_stride,
+        in_channels=3,
+        bottleneck_dim=args.bottleneck_dim,
         patch_size=args.patch_size,
-        vae_embed_dim=args.vae_embed_dim,
+        # vae_embed_dim=args.vae_embed_dim,
         mask_ratio_min=args.mask_ratio_min,
         label_drop_prob=args.label_drop_prob,
         class_num=args.class_num,
@@ -245,7 +249,7 @@ def main(args):
     print("effective batch size: %d" % eff_batch_size)
 
     if args.distributed:
-        model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.gpu])
+        model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.gpu], find_unused_parameters=True)
         model_without_ddp = model.module
 
     # no weight decay on bias, norm layers, and diffloss MLP
@@ -283,7 +287,7 @@ def main(args):
     # evaluate FID and IS
     if args.evaluate:
         torch.cuda.empty_cache()
-        evaluate(model_without_ddp, vae, ema_params, args, 0, batch_size=args.eval_bsz, log_writer=log_writer,
+        evaluate(model_without_ddp, ema_params, args, 0, batch_size=args.eval_bsz, log_writer=log_writer,
                  cfg=args.cfg, use_ema=True)
         return
 
@@ -296,7 +300,7 @@ def main(args):
             data_loader_train.sampler.set_epoch(epoch)
 
         avg_stats, last_epoch1000x_for_eval = train_one_epoch(
-            model, vae,
+            model,
             model_params, ema_params,
             data_loader_train,
             optimizer, device, epoch, loss_scaler,
@@ -317,7 +321,7 @@ def main(args):
             # evaluate(model_without_ddp, vae, ema_params, args, epoch, batch_size=args.eval_bsz, log_writer=log_writer,
             #          cfg=1.0, use_ema=True)
             # if not (args.cfg == 1.0 or args.cfg == 0.0):
-            evaluate(model_without_ddp, vae, ema_params, args, last_epoch1000x_for_eval, batch_size=args.eval_bsz // 2,
+            evaluate(model_without_ddp, ema_params, args, last_epoch1000x_for_eval, batch_size=args.eval_bsz // 2,
                          log_writer=log_writer, cfg=args.cfg, use_ema=True)
             torch.cuda.empty_cache()
 

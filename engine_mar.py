@@ -35,7 +35,7 @@ def update_ema(target_params, source_params, rate=0.99):
         targ.detach().mul_(rate).add_(src, alpha=1 - rate)
 
 
-def train_one_epoch(model, vae,
+def train_one_epoch(model,
                     model_params, ema_params,
                     data_loader: Iterable, optimizer: torch.optim.Optimizer,
                     device: torch.device, epoch: int, loss_scaler,
@@ -62,19 +62,20 @@ def train_one_epoch(model, vae,
         samples = samples.to(device, non_blocking=True)
         labels = labels.to(device, non_blocking=True)
 
-        with torch.no_grad():
-            if args.use_cached:
-                moments = samples
-                posterior = DiagonalGaussianDistribution(moments)
-            else:
-                posterior = vae.encode(samples)
+        # with torch.no_grad():
+        #     if args.use_cached:
+        #         moments = samples
+        #         posterior = DiagonalGaussianDistribution(moments)
+        #     else:
+        #         posterior = vae.encode(samples)
 
-            # normalize the std of latent to be 1. Change it if you use a different tokenizer
-            x = posterior.sample().mul_(0.2325)
+        #     # normalize the std of latent to be 1. Change it if you use a different tokenizer
+        #     x = posterior.sample().mul_(0.2325)
 
         # forward
         # with torch.amp.autocast('cuda'):
         #     loss = model(x, labels)
+        x = samples
         loss = model(x, labels)
 
         loss_value = loss.item()
@@ -131,7 +132,7 @@ def train_one_epoch(model, vae,
     return {k: meter.global_avg for k, meter in metric_logger.meters.items()}, last_epoch1000x_for_eval
 
 
-def evaluate(model_without_ddp, vae, ema_params, args, epoch, batch_size=16, log_writer=None, cfg=1.0,
+def evaluate(model_without_ddp, ema_params, args, epoch, batch_size=16, log_writer=None, cfg=1.0,
              use_ema=True):
     model_without_ddp.eval()
     num_steps = args.num_images // (batch_size * misc.get_world_size()) + 1
@@ -187,10 +188,10 @@ def evaluate(model_without_ddp, vae, ema_params, args, epoch, batch_size=16, log
             #                                                      cfg_schedule=args.cfg_schedule, labels=labels_gen,
             #                                                      temperature=args.temperature)
             #     sampled_images = vae.decode(sampled_tokens / 0.2325)
-            sampled_tokens = model_without_ddp.sample_tokens(bsz=batch_size, num_iter=args.num_iter, cfg=cfg,
+            sampled_images = model_without_ddp.sample_tokens(bsz=batch_size, num_iter=args.num_iter, cfg=cfg,
                                                                  cfg_schedule=args.cfg_schedule, labels=labels_gen,
                                                                  temperature=args.temperature)
-            sampled_images = vae.decode(sampled_tokens / 0.2325)
+            # sampled_images = vae.decode(sampled_tokens / 0.2325)
 
         # measure speed after the first generation batch
         if i >= 1:
@@ -201,7 +202,7 @@ def evaluate(model_without_ddp, vae, ema_params, args, epoch, batch_size=16, log
 
         # torch.distributed.barrier()
         sampled_images = sampled_images.detach().cpu()
-        sampled_images = (sampled_images + 1) / 2
+        # sampled_images = (sampled_images + 1) / 2
 
         # distributed save
         for b_id in range(sampled_images.size(0)):
