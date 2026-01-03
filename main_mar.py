@@ -184,7 +184,7 @@ def main(args):
         transforms.Lambda(lambda pil_image: center_crop_arr(pil_image, args.img_size)),
         transforms.RandomHorizontalFlip(),
         transforms.ToTensor(),
-        transforms.Normalize([0.5, 0.5, 0.5], [0.5, 0.5, 0.5])
+        # transforms.Normalize([0.5, 0.5, 0.5], [0.5, 0.5, 0.5])
     ])
 
     if args.use_cached:

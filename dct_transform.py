@@ -2,8 +2,7 @@ import torch
 # import torch_dct as dct
 import numpy as np
 from torchvision import transforms
-from models.dct_layer import DCT2DLayer, MyDCT2DLayer, MyInverseDCT2DLayer
-
+from models.dct_layer import DCT2DLayer
 import matplotlib.pyplot as plt
 from PIL import Image
 import os
@@ -11,7 +10,7 @@ import random
 import seaborn as sns
 
 def generate_square_sequence(max_val, num):
-    max_val /= 10
+    max_val /= 100
     sequence = []
     i = 1
     sqrt_max_val = int(max_val**0.5)+1

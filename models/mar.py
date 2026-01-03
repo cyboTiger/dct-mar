@@ -14,7 +14,7 @@ from timm.models.vision_transformer import Block
 from models.diffloss import DiffLoss
 import torch_dct as dct
 
-from models.dct_layer import DCT2DLayer, MyDCT2DLayer, MyInverseDCT2DLayer
+from models.dct_layer import DCT2DLayer, LinearDCT
 from models.lin_emb import BottleneckPatchEmbed, FinalLayer
 
 import matplotlib.pyplot as plt
@@ -26,9 +26,11 @@ import seaborn as sns
 def safe_log_transform(x):
     # use log1p to ensure numerical stability
     return torch.sign(x) * torch.log1p(torch.abs(x))
+    # return torch.sign(x) * torch.log1p(torch.abs(x)*5) / 5
 
 def safe_exp_transform(x):
     return torch.sign(x) * (torch.exp(torch.abs(x)) - 1.0)
+    # return torch.sign(x) * (torch.exp(torch.abs(x)*5) - 1.0) / 5
 
 
 def mask_by_order(mask_len, order, bsz, seq_len):
@@ -46,6 +48,7 @@ class MAR(nn.Module):
                  mlp_ratio=4., norm_layer=nn.LayerNorm,
                  vae_embed_dim=16,
                  mask_ratio_min=0.7,
+                 hybrid_prob=0.7,
                  label_drop_prob=0.1,
                  class_num=1000,
                  attn_dropout=0.1,
@@ -66,7 +69,7 @@ class MAR(nn.Module):
         self.patch_size = patch_size
         self.in_channels = in_channels
         # 
-        self.seq_h = self.seq_w = img_size // patch_size
+        self.seq_h = self.seq_w = self.grid_size = img_size // patch_size
         self.seq_len = self.seq_h * self.seq_w
         # a patch is transformed into a token
         self.token_embed_dim = encoder_embed_dim
@@ -92,12 +95,12 @@ class MAR(nn.Module):
         # DCT/IDCT layer
         self.dct_layer = DCT2DLayer(size_h=img_size, size_w=img_size, direction='dct', norm='ortho')
         self.idct_layer = DCT2DLayer(size_h=img_size, size_w=img_size, direction='idct', norm='ortho')
-        self.ln = nn.LayerNorm(encoder_embed_dim)
+        # self.ln = nn.LayerNorm(encoder_embed_dim)
 
         # --------------------------------------------------------------------------
         # MAR variant masking ratio, a left-half truncated Gaussian centered at 100% masking ratio with std 0.25
         self.mask_ratio_generator = stats.truncnorm((mask_ratio_min - 1.0) / 0.25, 0, loc=1.0, scale=0.25)
-
+        self.hybrid_prob = hybrid_prob
         # --------------------------------------------------------------------------
         # MAR encoder specifics
         self.z_proj = nn.Linear(self.token_embed_dim, encoder_embed_dim, bias=True)
@@ -150,7 +153,9 @@ class MAR(nn.Module):
     def initialize_weights(self):
         # parameters
         torch.nn.init.normal_(self.class_emb.weight, std=.02)
-        torch.nn.init.normal_(self.linear_embed.weight, std=.02)
+        for m in self.linear_embed.modules():
+            if isinstance(m, nn.Linear):
+                torch.nn.init.normal_(m.weight, std=.02)
         torch.nn.init.normal_(self.fake_latent, std=.02)
         torch.nn.init.normal_(self.mask_token, std=.02)
         torch.nn.init.normal_(self.encoder_pos_embed_learned, std=.02)
@@ -161,6 +166,8 @@ class MAR(nn.Module):
         self.apply(self._init_weights)
 
     def _init_weights(self, m):
+        if isinstance(m, LinearDCT):
+            return
         if isinstance(m, nn.Linear):
             # we use xavier_uniform following official JAX ViT:
             torch.nn.init.xavier_uniform_(m.weight)
@@ -230,11 +237,16 @@ class MAR(nn.Module):
         order.sort(key=lambda x: x[1])
         return np.array([x[0] for x in order])
     
-    def sample_orders_zigzag(self, bsz):
+    def sample_orders_zigzag(self, bsz, hybrid_prob=None):
+        if hybrid_prob is not None:
+            if random.random() > hybrid_prob:
+                return self.sample_orders(bsz)
         order = torch.from_numpy(self.zigzag_order).long().cuda()
         return order.unsqueeze(0).repeat(bsz, 1)
 
-    def random_masking_zigzag(self, x, orders):
+    def random_masking_zigzag(self, x, orders, is_zigzag=True):
+        if not is_zigzag:
+            return self.random_masking(x, orders)
         bsz, seq_len, _ = x.shape
         mask_rate = self.mask_ratio_generator.rvs(1)[0] 
         num_keep = int(np.ceil(seq_len * (1 - mask_rate)))
@@ -324,6 +336,7 @@ class MAR(nn.Module):
         x = self.dct_layer(imgs) # [B, c, h, w]
 
         x = safe_log_transform(x) # approxiamted range: [-12, 12]
+        # x = self.ln(x) # not sure whether to add or not
 
         # convert to patch token dim
         x = self.patchify(x) # [B, l, c*p*p]
@@ -333,8 +346,8 @@ class MAR(nn.Module):
         x = self.linear_embed(x) # [B*l, embed_dim]
         
         gt_latents = x.clone().detach()
-        orders = self.sample_orders(bsz=x.size(0))
-        mask = self.random_masking(x, orders)
+        orders = self.sample_orders_zigzag(bsz=x.size(0), hybrid_prob=self.hybrid_prob)
+        mask = self.random_masking_zigzag(x, orders)
 
         # mae encoder
         x = self.forward_mae_encoder(x, mask, class_embedding)
@@ -365,7 +378,7 @@ class MAR(nn.Module):
         # init and sample generation orders
         mask = torch.ones(bsz, self.seq_len).cuda()
         tokens = torch.zeros(bsz, self.seq_len, self.token_embed_dim).cuda()
-        orders = self.sample_orders(bsz)
+        orders = self.sample_orders_zigzag(bsz)
 
         indices = list(range(num_iter))
         if progress:
