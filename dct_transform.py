@@ -7,10 +7,11 @@ import matplotlib.pyplot as plt
 from PIL import Image
 import os
 import random
+from util.crop import center_crop_arr
 import seaborn as sns
 
 def generate_square_sequence(max_val, num):
-    max_val /= 100
+    max_val /= 10
     sequence = []
     i = 1
     sqrt_max_val = int(max_val**0.5)+1
@@ -60,16 +61,33 @@ def load_and_preprocess_image(image_path):
     load jpg and convert to torch tensors
     """
 
-    img = Image.open(image_path).convert('L')  # gray image
+    # img = Image.open(image_path).convert('L')  # gray image
     img = Image.open(image_path)  # rgb image
     print(f"Original image size: {img.size}")
+
+    H, W = img.size
+
+    max_size = 512
+    if H > max_size or W > max_size:
+        resize = transforms.Resize(max_size)
+        img = resize(img)
+        print(f"Resized image size: {H}x{W}")
+
+    transform_train = transforms.Compose([
+        # transforms.Lambda(lambda pil_image: center_crop_arr(pil_image, max_size)),
+        transforms.RandomHorizontalFlip(),
+        transforms.ToTensor(),
+        transforms.Normalize([0.5, 0.5, 0.5], [0.5, 0.5, 0.5])
+    ])
+
+    img_tensor = transform_train(img)
     
-    # convert to numpy
-    img_array = np.array(img, dtype=np.float32)
+    # # convert to numpy
+    # img_array = np.array(img, dtype=np.float32)
     
-    # convert to torch tensor
-    img_tensor = torch.from_numpy(img_array)
-    img_tensor = img_tensor.permute(2, 0, 1) # (C, W, H)
+    # # convert to torch tensor
+    # img_tensor = torch.from_numpy(img_array)
+    # img_tensor = img_tensor.permute(2, 0, 1) # (C, W, H)
     
     return img_tensor
 
@@ -79,22 +97,28 @@ def apply_dct_and_visualize(image_path, block_size=8):
     """
     # load and process image
     img_tensor = load_and_preprocess_image(image_path)
+    print(f"Processed pixel range: [{img_tensor.min():.2f}, {img_tensor.max():.2f}]")
     H, W = img_tensor.shape[-2:]
     
     # resize
     max_size = 512
-    if H > max_size or W > max_size:
-        resize = transforms.Resize(max_size)
-        img_tensor = resize(img_tensor.unsqueeze(0)).squeeze(0)
-        print(img_tensor.shape)
-        H, W = img_tensor.shape[-2:]
-        print(f"Resized image size: {H}x{W}")
+    # if H > max_size or W > max_size:
+    #     resize = transforms.Resize(max_size)
+    #     img_tensor = resize(img_tensor.unsqueeze(0)).squeeze(0)
+    #     H, W = img_tensor.shape[-2:]
+    #     print(f"Resized image size: {H}x{W}")
     
     # apply 2d dct
     dctnet = DCT2DLayer(H, W)
     idctnet = DCT2DLayer(H, W, 'idct')
     dct_result = dctnet(img_tensor.unsqueeze(0)).squeeze()
     print(f"DCT Coeff range: [{dct_result.min():.2f}, {dct_result.max():.2f}]")
+
+    dct_result = (dct_result+1) / 2
+    dct_result *= 255
+
+    print(f"Real DCT Coeff range: [{dct_result.min():.2f}, {dct_result.max():.2f}]")
+
     
     row, col = 3, 5
 

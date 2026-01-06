@@ -26,6 +26,8 @@ import copy
 
 def get_args_parser():
     parser = argparse.ArgumentParser('MAR training with Diffusion Loss', add_help=False)
+    parser.add_argument('--wandb_proj', default=None, type=str, 
+                        help='Name of wandb project')
     parser.add_argument('--batch_size', default=16, type=int,
                         help='Batch size per GPU (effective batch size is batch_size * # gpus')
     parser.add_argument('--epochs', default=400, type=int)
@@ -174,7 +176,7 @@ def main(args):
         proj_name = val_name if args.evaluate else train_name
         run_name =  args.model if args.evaluate else f"run-blr-{args.blr}-clip-{args.grad_clip}-lr_sched-{args.lr_schedule}" 
         wandb.init(
-            project=f"MAR-DCT-Linear-{mar_size}-{proj_name}-with-CIFAR100-TrainSet",     # 设置项目名称
+            project=f"MAR-DCT-Linear-{mar_size}-pixel-loss-with-CIFAR100-TrainSet",     # 设置项目名称
             name=run_name,  # 设置本次运行的名称 (方便区分)
             config=args                     # 可选：将所有命令行参数记录为超参数
         )

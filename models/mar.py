@@ -26,12 +26,9 @@ import seaborn as sns
 def safe_log_transform(x):
     # use log1p to ensure numerical stability
     return torch.sign(x) * torch.log1p(torch.abs(x))
-    # return torch.sign(x) * torch.log1p(torch.abs(x)*5) / 5
 
 def safe_exp_transform(x):
     return torch.sign(x) * (torch.exp(torch.abs(x)) - 1.0)
-    # return torch.sign(x) * (torch.exp(torch.abs(x)*5) - 1.0) / 5
-
 
 def mask_by_order(mask_len, order, bsz, seq_len):
     masking = torch.zeros(bsz, seq_len).cuda()
@@ -75,6 +72,7 @@ class MAR(nn.Module):
         self.token_embed_dim = encoder_embed_dim
         self.grad_checkpointing = grad_checkpointing
         self.linear_embed = nn.Sequential(nn.Linear(patch_size**2*in_channels, bottleneck_dim), 
+                                          nn.GELU(),
                                           nn.Linear(bottleneck_dim, encoder_embed_dim))
         # self.linear_embed = BottleneckPatchEmbed(img_size=img_size, 
         #                                          patch_size=patch_size, 
@@ -369,7 +367,20 @@ class MAR(nn.Module):
             gt_dct[mask_flat==1]
         )
 
+        bsz = imgs.shape[0]
+        recon_dct_slice = recon_dct[:bsz*self.seq_len].reshape(bsz, self.seq_len, -1) # [B*l, c*p*p]
+        recon_dct_slice = self.unpatchify(recon_dct_slice)
+        recon_dct_slice = safe_exp_transform(recon_dct_slice)
+        recon_pixel = self.idct_layer(recon_dct_slice)
+        recon_pixel = recon_pixel.clamp(0, 1)
+
+        recon_pixel_loss = F.mse_loss(
+            recon_pixel,
+            imgs
+        )
+
         loss += self.recon_lambda*recon_loss
+        loss += 0.5*recon_pixel_loss
 
         return loss
 
